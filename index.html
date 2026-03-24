@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="SårAssist"/>
+<meta name="theme-color" content="#0f1117"/>
+<title>SårAssist — AI Sårdokumentasjon</title>
+<link rel="icon" href="icon-192.png"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<link rel="manifest" href="manifest.json"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#0f1117;overflow-x:hidden}
+body{font-family:'Manrope','Segoe UI',system-ui,sans-serif;color:#dfe2e8;-webkit-font-smoothing:antialiased}
+::selection{background:#3d7a8a;color:#fff}
+input:focus,textarea:focus,select:focus{outline:none}
+@keyframes wa-spin{to{transform:rotate(360deg)}}
+@keyframes wa-fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes wa-ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(1);opacity:0}}
+.wa-spinner{display:inline-block;width:14px;height:14px;border:2px solid #0f1117;border-top-color:transparent;border-radius:50%;animation:wa-spin .8s linear infinite}
+#root{min-height:100vh}
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet"/>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('./sw.js');}</script>
+
+<script type="text/babel" data-type="module">
+const {useState, useEffect, useRef, useCallback} = React;
+
+/* ═══════════════════════ CONSTANTS ═══════════════════════ */
+
+const PROVIDERS = {
+  anthropic: { label: "Anthropic (Claude)", models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514"], keyUrl: "https://console.anthropic.com/settings/keys", keyPlaceholder: "sk-ant-api03-…" },
+  openai: { label: "OpenAI (GPT-4o)", models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1"], keyUrl: "https://platform.openai.com/api-keys", keyPlaceholder: "sk-proj-…" },
+  gemini: { label: "Google Gemini", models: ["gemini-2.5-pro", "gemini-2.0-flash"], keyUrl: "https://aistudio.google.com/apikey", keyPlaceholder: "AIza…" },
+};
+
+const REPORT_TYPES = [
+  { id: "vanlig", label: "Vanlig sårstell", desc: "Kort rapport for rutinemessig sårskift", icon: "📋" },
+  { id: "nytt", label: "Nytt sår + prosedyre", desc: "Grundig vurdering med sårprosedyre for teamet", icon: "📐" },
+  { id: "revurdering", label: "Planlagt revurdering", desc: "Endring i tilstand, ny prosedyre eller skift av løsning", icon: "🔄" },
+];
+
+const STEPS = [
+  { id: "oppsett", label: "Oppsett", icon: "⚙" },
+  { id: "forberedelse", label: "Forberedelse", icon: "📷" },
+  { id: "analyse", label: "Analyse", icon: "🔬" },
+  { id: "rediger", label: "Rediger & Send", icon: "✉" },
+];
+
+const CLINICAL_INPUTS = [
+  { id: "lukt", label: "Lukt", placeholder: "f.eks. ingen, mild, sterk/illeluktende…", icon: "👃" },
+  { id: "smerte", label: "Smerte (VAS 0–10)", placeholder: "f.eks. 3/10 ved stell, 0 i hvile…", icon: "⚡" },
+  { id: "temperatur", label: "Temperatur/varme", placeholder: "f.eks. normal, lett varm, tydelig varm…", icon: "🌡" },
+  { id: "ekssudat_mengde", label: "Ekssudat ved stell", placeholder: "f.eks. lite, moderat, mye — type/farge…", icon: "💧" },
+];
+
+/* ═══════════════════════ SYSTEM PROMPTS ═══════════════════════ */
+
+const buildSystemPrompt = (reportType, clinicalInputs) => {
+  const clinicalContext = Object.entries(clinicalInputs || {})
+    .filter(([_, v]) => v && v.trim())
+    .map(([k, v]) => {
+      const labels = { lukt: "Lukt", smerte: "Smerte", temperatur: "Temperatur/varme", ekssudat_mengde: "Ekssudat ved stell" };
+      return `- ${labels[k] || k}: ${v}`;
+    }).join("\n");
+
+  const clinicalBlock = clinicalContext
+    ? `\nKLINISKE OBSERVASJONER FRA SYKEPLEIER (bruk disse aktivt i rapporten):\n${clinicalContext}\n`
+    : "\nIngen kliniske tilleggsobservasjoner oppgitt — merk dette i rapporten der relevant.\n";
+
+  const baseRules = `Du er et klinisk sårverktøy brukt av autoriserte sykepleiere i norsk hjemmesykepleie. Alle bilder er klinisk sårdokumentasjon tatt som del av standard sykepleie.
+
+KAMERAKALIBRERING:
+- Mobilkameraer bruker aggressiv autobehandling (HDR, hvitbalanse, computational photography)
+- Når to bilder: ett med BLITS og ett UTEN — kryss-referér begge for nøyaktig fargevurdering
+- Blitsbilder kan overeksponere sårbunn men gir bedre fargenøyaktighet på omkringliggende hud
+- Bilder uten blits viser mer naturlig dybde/tekstur men kan ha unøyaktig fargetemperatur
+- Hvis HVIT REFERANSE (kompress, papir) er synlig i bildet, bruk den for fargekalibrering
+- Vær KONSERVATIV i alle fargebaserte vurderinger (erytem-utbredelse, vevsfarge, maserasjon)
+${clinicalBlock}
+KRITISKE REGLER:
+- Skriv ALLTID på norsk (bokmål)
+- Output skal være en FERDIG rapport klar til å limes inn i pasientjournal — INGEN AI-disclaimere, INGEN "som AI kan jeg ikke…", INGEN forbehold om at du er en maskin
+- Skriv i klinisk journalspråk, kort og presist, slik en erfaren sykepleier ville dokumentert
+- Når du er usikker på noe fra bildet, skriv det som "usikkert" eller "vanskelig å vurdere fra foto" — IKKE som AI-begrensning
+- Alle AI-spesifikke merknader (hva som ikke kan vurderes fra foto) skal BARE stå i seksjonen "MERKNADER" — ALDRI i selve rapporten`;
+
+  if (reportType === "vanlig") {
+    return `${baseRules}
+
+RAPPORTTYPE: Vanlig sårstell (kort skiftrapport)
+
+OUTPUT-FORMAT — skriv en kortfattet, journal-klar rapport:
+
+SÅRRAPPORT — [dato settes inn av bruker]
+
+Sårtype: [klassifisering]
+Lokalisasjon: [beskriv fra bilde eller merk "ikke spesifisert"]
+
+Sårbunn: [vevstypene, prosentfordeling om mulig]
+Sårkanter: [tilstand]
+Omkringliggende hud: [tilstand]
+Ekssudat: [type, mengde]
+Infeksjonstegn: [ja/nei + detaljer]
+Størrelse: [estimat hvis linjal synlig, ellers "se måling"]
+
+Tiltak utført: [beskriv standard stell basert på det som er synlig]
+
+---
+MERKNADER (ikke del av journalrapport):
+[List her: ting som krever klinisk vurdering ved seng, usikkerheter fra bildeanalyse, anbefalinger for neste stell]`;
+  }
+
+  if (reportType === "nytt") {
+    return `${baseRules}
+
+RAPPORTTYPE: Nytt oppdaget sår — fullstendig TIMES-vurdering + sårprosedyre
+
+OUTPUT-FORMAT:
+
+SÅRRAPPORT — FØRSTEGANGS VURDERING
+
+Sårtype: [fullstendig klassifisering med begrunnelse, f.eks. "Trykksår EPUAP grad II sakralt"]
+Lokalisasjon: [anatomisk plassering]
+Antatt etiologi: [årsak/risikofaktorer]
+
+TIMES-VURDERING:
+
+T — Vevstype:
+[Detaljert beskrivelse: granulasjon, epitel, slough, nekrose — prosentfordeling]
+
+I — Infeksjon/Inflammasjon:
+[Kliniske tegn — inkluder sykepleiers observasjoner om lukt/varme/smerte]
+
+M — Fuktighetsbalanse:
+[Ekssudat: type, mengde, konsistens. Sårbunn fuktighet. Maserasjon.]
+
+E — Sårkanter:
+[Tilheling, epibole, maserasjon, underminering om kjent]
+
+S — Omkringliggende hud:
+[Tilstand, utbredelse fra sårkant]
+
+Størrelse: [estimat eller "krever måling med linjal"]
+
+SÅRPROSEDYRE:
+1. Rengjøring: [metode og løsning]
+2. Debridering: [om nødvendig — metode]
+3. Primærbandasje: [type, begrunnelse]
+4. Sekundærbandasje: [type]
+5. Skiftfrekvens: [anbefalt intervall]
+6. Stillingsendring/avlastning: [om relevant]
+7. Evalueringspunkt: [når revurdere]
+
+---
+MERKNADER (ikke del av journalrapport):
+[Usikkerheter, anbefalinger for videre utredning, foreslåtte tiltak sykepleier bør vurdere]`;
+  }
+
+  return `${baseRules}
+
+RAPPORTTYPE: Planlagt revurdering av eksisterende sår — vurder endring, ny prosedyre/løsning
+
+OUTPUT-FORMAT:
+
+SÅRRAPPORT — REVURDERING
+
+Sårtype: [bekreft/oppdater klassifisering]
+Lokalisasjon: [anatomisk plassering]
+
+Nåværende status (TIMES):
+
+T — Vevstype: [nåværende tilstand]
+I — Infeksjon/Inflammasjon: [tegn, endring]
+M — Fuktighetsbalanse: [ekssudat, endring]
+E — Sårkanter: [progresjon]
+S — Omkringliggende hud: [tilstand]
+
+Klinisk vurdering:
+[Samlet vurdering: bedring/forverring/uendret. Behov for endring i prosedyre. Begrunnelse.]
+
+Foreslått endring i prosedyre:
+[Konkret hva som bør endres — løsning, bandasje, frekvens, annet. Hvis ingen endring: begrunn videreføring.]
+
+---
+MERKNADER (ikke del av journalrapport):
+[Usikkerheter fra bildeanalyse, anbefaling om lege/sårteam, ting som krever klinisk vurdering]`;
+};
+
+/* ═══════════════════════ IMAGE UTILS ═══════════════════════ */
+
+function compressImage(file, maxDim = 1920, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Kunne ikke lese filen"));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Kunne ikke laste bildet"));
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) { h = Math.round((h / w) * maxDim); w = maxDim; }
+          else { w = Math.round((w / h) * maxDim); h = maxDim; }
+        }
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ═══════════════════════ API CALLS ═══════════════════════ */
+
+async function callProvider(provider, apiKey, model, systemPrompt, imagesB64, userText) {
+  if (provider === "anthropic") {
+    const content = [];
+    imagesB64.forEach((b64) => content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } }));
+    content.push({ type: "text", text: userText });
+    const headers = { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" };
+    const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify({ model, max_tokens: 4096, system: systemPrompt, messages: [{ role: "user", content }] }) });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e?.error?.message || `Anthropic feil ${res.status}`); }
+    const data = await res.json();
+    return data.content?.map((b) => b.text || "").join("\n") || "";
+  }
+  if (provider === "openai") {
+    const msgContent = [];
+    imagesB64.forEach((b64) => msgContent.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}`, detail: "high" } }));
+    msgContent.push({ type: "text", text: userText });
+    const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, max_tokens: 4096, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: msgContent }] }) });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e?.error?.message || `OpenAI feil ${res.status}`); }
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content || "";
+  }
+  if (provider === "gemini") {
+    const parts = [];
+    imagesB64.forEach((b64) => parts.push({ inlineData: { mimeType: "image/jpeg", data: b64 } }));
+    parts.push({ text: userText });
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt }] }, contents: [{ parts }], generationConfig: { maxOutputTokens: 4096 } }) });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e?.error?.message || `Gemini feil ${res.status}`); }
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n") || "";
+  }
+  throw new Error("Ukjent leverandør");
+}
+
+async function callRefinement(provider, apiKey, model, systemPrompt, currentReport, userInstruction) {
+  const text = `Her er gjeldende sårrapport:\n\n${currentReport}\n\n---\nSykepleiers instruksjon: ${userInstruction}\n\nOppdater rapporten i henhold til instruksjonen. Behold samme format. Output kun den oppdaterte rapporten.`;
+  if (provider === "anthropic") {
+    const headers = { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" };
+    const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify({ model, max_tokens: 4096, system: systemPrompt, messages: [{ role: "user", content: text }] }) });
+    if (!res.ok) throw new Error(`Anthropic feil ${res.status}`);
+    const data = await res.json();
+    return data.content?.map((b) => b.text || "").join("\n") || "";
+  }
+  if (provider === "openai") {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, max_tokens: 4096, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: text }] }) });
+    if (!res.ok) throw new Error(`OpenAI feil ${res.status}`);
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content || "";
+  }
+  if (provider === "gemini") {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt }] }, contents: [{ parts: [{ text }] }], generationConfig: { maxOutputTokens: 4096 } }) });
+    if (!res.ok) throw new Error(`Gemini feil ${res.status}`);
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n") || "";
+  }
+  throw new Error("Ukjent leverandør");
+}
+
+/* ═══════════════════════ MARKDOWN RENDERER ═══════════════════════ */
+
+function MdRender({ text, muted }) {
+  if (!text) return null;
+  const col = muted
+    ? { h2: "#8ba4a8", h3: "#7a9196", p: "#8899a0", strong: "#9db5ba", bullet: "#5a8892" }
+    : { h2: "#7ec4cf", h3: "#9ab8bd", p: "#bfc5cc", strong: "#c8dce0", bullet: "#5ba4b5" };
+  const lines = text.split("\n");
+  const elements = [];
+  let key = 0;
+  for (const line of lines) {
+    if (line.startsWith("---")) elements.push(<hr key={key++} style={{ border: "none", borderTop: "1px solid #2a303c", margin: "14px 0" }} />);
+    else if (line.startsWith("## ")) elements.push(<h2 key={key++} style={{ fontSize: 16, fontWeight: 700, color: col.h2, margin: "16px 0 6px", fontFamily: "'Source Serif 4', Georgia, serif" }}>{line.slice(3)}</h2>);
+    else if (line.startsWith("### ")) elements.push(<h3 key={key++} style={{ fontSize: 13.5, fontWeight: 600, color: col.h3, margin: "12px 0 4px", letterSpacing: "0.02em", textTransform: "uppercase" }}>{line.slice(4)}</h3>);
+    else if (/^\d+\.\s/.test(line)) elements.push(<div key={key++} style={{ fontSize: 13, lineHeight: 1.6, color: col.p, paddingLeft: 4, margin: "2px 0" }}>{rinl(line, col.strong)}</div>);
+    else if (line.startsWith("- ") || line.startsWith("* ")) elements.push(<div key={key++} style={{ fontSize: 13, lineHeight: 1.6, color: col.p, paddingLeft: 14, position: "relative", margin: "2px 0" }}><span style={{ position: "absolute", left: 0, color: col.bullet }}>•</span>{rinl(line.slice(2), col.strong)}</div>);
+    else if (line.trim() === "") elements.push(<div key={key++} style={{ height: 6 }} />);
+    else elements.push(<p key={key++} style={{ fontSize: 13, lineHeight: 1.6, color: col.p, margin: "2px 0" }}>{rinl(line, col.strong)}</p>);
+  }
+  return <>{elements}</>;
+}
+
+function rinl(text, sc) {
+  return text.split(/(\*\*[^*]+\*\*)/).map((p, i) =>
+    p.startsWith("**") && p.endsWith("**") ? <strong key={i} style={{ color: sc, fontWeight: 600 }}>{p.slice(2, -2)}</strong> : p
+  );
+}
+
+/* ═══════════════════════ COLORS ═══════════════════════ */
+
+const C = {
+  bg: "#0f1117", surface: "#181b22", card: "#1e222b",
+  border: "#2a303c", borderLight: "#353d4a",
+  accent: "#5ba4b5", accentDim: "#3d7a8a", accentGlow: "#6ec8d8",
+  text: "#dfe2e8", textSec: "#8b919c", textMuted: "#555d6a",
+  success: "#5bb577", warning: "#c9a04d", error: "#c75b5b",
+};
+
+/* ═══════════════════════ GLASS BUTTON ═══════════════════════ */
+
+function GlassBtn({ children, onClick, style: extraStyle, disabled, ...props }) {
+  const [pressed, setPressed] = useState(false);
+  const [glow, setGlow] = useState(false);
+  return (
+    <button disabled={disabled}
+      onClick={(e) => { if (disabled) return; setGlow(true); setTimeout(() => setGlow(false), 400); onClick?.(e); }}
+      onMouseDown={() => !disabled && setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      onMouseLeave={() => setPressed(false)}
+      onTouchStart={() => !disabled && setPressed(true)}
+      onTouchEnd={() => setPressed(false)}
+      style={{
+        padding: "11px 24px", borderRadius: 10, border: "1px solid rgba(91,164,181,0.2)",
+        cursor: disabled ? "default" : "pointer", fontFamily: "inherit", fontWeight: 600, fontSize: 13.5,
+        transition: "all 0.25s cubic-bezier(0.4,0,0.2,1)",
+        transform: pressed ? "scale(0.96)" : "scale(1)",
+        boxShadow: glow ? "0 0 24px rgba(91,164,181,0.25), inset 0 1px 1px rgba(255,255,255,0.08)" : "0 2px 8px rgba(0,0,0,0.18), inset 0 1px 1px rgba(255,255,255,0.04)",
+        backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+        display: "inline-flex", alignItems: "center", gap: 7,
+        opacity: disabled ? 0.4 : 1,
+        ...extraStyle,
+      }}
+      {...props}
+    >{children}</button>
+  );
+}
+
+/* ═══════════════════════ MAIN APP ═══════════════════════ */
+
+function App() {
+  const [page, setPage] = useState("oppsett");
+  const defaults = { provider: "anthropic", apiKey: "", model: "claude-sonnet-4-20250514", email: "", customPrompt: "" };
+  const [settings, setSettings] = useState(() => {
+    try { const s = localStorage.getItem("wa_s2"); return s ? { ...defaults, ...JSON.parse(s) } : defaults; } catch { return defaults; }
+  });
+
+  const [reportType, setReportType] = useState("vanlig");
+  const [imgFlash, setImgFlash] = useState(null);
+  const [imgNoFlash, setImgNoFlash] = useState(null);
+  const [imgFlashPrev, setImgFlashPrev] = useState(null);
+  const [imgNoFlashPrev, setImgNoFlashPrev] = useState(null);
+  const [clinical, setClinical] = useState({ lukt: "", smerte: "", temperatur: "", ekssudat_mengde: "" });
+  const [advancedNotes, setAdvancedNotes] = useState("");
+  const [showAdvNotes, setShowAdvNotes] = useState(false);
+  const [report, setReport] = useState("");
+  const [merknader, setMerknader] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState("");
+  const [refineInput, setRefineInput] = useState("");
+  const [refining, setRefining] = useState(false);
+  const [refineHistory, setRefineHistory] = useState([]);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [editingPrompt, setEditingPrompt] = useState(false);
+  const [gdprExpanded, setGdprExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const flashRef = useRef(null);
+  const noFlashRef = useRef(null);
+
+  useEffect(() => { try { localStorage.setItem("wa_s2", JSON.stringify(settings)); } catch {} }, [settings]);
+
+  const updateSetting = (k, v) => setSettings((p) => ({ ...p, [k]: v }));
+  const handleProviderChange = (prov) => { updateSetting("provider", prov); updateSetting("model", PROVIDERS[prov].models[0]); updateSetting("apiKey", ""); };
+
+  const handleImg = async (file, type) => {
+    if (!file) return;
+    try {
+      const b64 = await compressImage(file);
+      const prev = `data:image/jpeg;base64,${b64}`;
+      if (type === "flash") { setImgFlash(b64); setImgFlashPrev(prev); } else { setImgNoFlash(b64); setImgNoFlashPrev(prev); }
+    } catch (err) { setError("Kunne ikke behandle bildet: " + err.message); }
+  };
+
+  const splitReport = (fullText) => {
+    const markers = ["---\nMERKNADER", "MERKNADER (ikke del av journalrapport)"];
+    let splitIdx = -1, matchLen = 0;
+    for (const m of markers) { const idx = fullText.indexOf(m); if (idx !== -1 && (splitIdx === -1 || idx < splitIdx)) { splitIdx = idx; matchLen = m.length; } }
+    if (splitIdx !== -1) {
+      setReport(fullText.substring(0, splitIdx).replace(/---\s*$/, "").trim());
+      setMerknader(fullText.substring(splitIdx + matchLen).replace(/^[:\s]*/, "").trim());
+    } else { setReport(fullText.trim()); setMerknader(""); }
+  };
+
+  const runAnalysis = async () => {
+    if (!imgFlash) { setError("Minst ett bilde (med blits) er påkrevd."); return; }
+    setError(""); setAnalyzing(true); setReport(""); setMerknader(""); setRefineHistory([]);
+    try {
+      const images = [imgFlash]; if (imgNoFlash) images.push(imgNoFlash);
+      const prompt = settings.customPrompt || buildSystemPrompt(reportType, clinical);
+      let userText = images.length === 2
+        ? "Bilde 1: Tatt MED kamerablits. Bilde 2: Tatt UTEN blits (kun omgivelseslys). Kryss-referér begge bildene for nøyaktig fargevurdering."
+        : "Dette sårbildet er tatt med kamerablits. Vær konservativ i fargebaserte vurderinger.";
+      if (advancedNotes.trim()) userText += `\n\nTilleggsinfo fra sykepleier: ${advancedNotes.trim()}`;
+      userText += "\n\nSkriv fullstendig sårrapport i henhold til angitt format.";
+      const result = await callProvider(settings.provider, settings.apiKey, settings.model, prompt, images, userText);
+      splitReport(result);
+      setPage("analyse");
+    } catch (err) { setError(err.message || "Analyse feilet"); }
+    finally { setAnalyzing(false); }
+  };
+
+  const runRefinement = async () => {
+    if (!refineInput.trim() || !report) return;
+    setRefining(true); setError("");
+    const instruction = refineInput.trim(); setRefineInput("");
+    setRefineHistory((h) => [...h, { role: "user", text: instruction }]);
+    try {
+      const prompt = settings.customPrompt || buildSystemPrompt(reportType, clinical);
+      const fullCurrent = merknader ? `${report}\n\n---\nMERKNADER (ikke del av journalrapport):\n${merknader}` : report;
+      const result = await callRefinement(settings.provider, settings.apiKey, settings.model, prompt, fullCurrent, instruction);
+      splitReport(result);
+      setRefineHistory((h) => [...h, { role: "ai", text: "Rapport oppdatert." }]);
+    } catch (err) { setError(err.message); setRefineHistory((h) => [...h, { role: "ai", text: `Feil: ${err.message}` }]); }
+    finally { setRefining(false); }
+  };
+
+  const emailReport = () => {
+    const date = new Date().toLocaleDateString("nb-NO");
+    const typeName = REPORT_TYPES.find((r) => r.id === reportType)?.label || "";
+    const plain = report.replace(/#{1,3}\s/g, "").replace(/\*\*/g, "");
+    const a = document.createElement("a");
+    a.href = `mailto:${settings.email}?subject=${encodeURIComponent("Sårrapport (" + typeName + ") - " + date)}&body=${encodeURIComponent(plain)}`;
+    a.click();
+  };
+
+  const copyReport = () => {
+    const plain = report.replace(/#{1,3}\s/g, "").replace(/\*\*/g, "");
+    navigator.clipboard.writeText(plain).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+  };
+
+  const resetCapture = () => {
+    setImgFlash(null); setImgNoFlash(null); setImgFlashPrev(null); setImgNoFlashPrev(null);
+    setClinical({ lukt: "", smerte: "", temperatur: "", ekssudat_mengde: "" });
+    setAdvancedNotes(""); setReport(""); setMerknader(""); setRefineHistory([]);
+    setError(""); setPage("forberedelse");
+  };
+
+  const pageIndex = STEPS.findIndex((st) => st.id === page);
+  const canAnalyze = imgFlash && settings.apiKey;
+
+  /* ── Shared styles ── */
+  const inputStyle = { width: "100%", padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text, fontSize: 13, outline: "none", fontFamily: "inherit", transition: "border-color 0.2s, box-shadow 0.2s" };
+  const focusInput = (e) => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = "0 0 0 2px rgba(91,164,181,0.12)"; };
+  const blurInput = (e) => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; };
+  const cardStyle = { background: C.card, borderRadius: 14, padding: "16px 18px", marginBottom: 12, border: `1px solid ${C.border}` };
+  const labelStyle = { display: "block", fontSize: 10.5, letterSpacing: 1.8, color: C.textSec, textTransform: "uppercase", marginBottom: 6, fontWeight: 600 };
+  const hintStyle = { fontSize: 11, color: C.textMuted, marginTop: 4, lineHeight: 1.4 };
+
+  const currentPrompt = settings.customPrompt || buildSystemPrompt(reportType, clinical);
+
+  return (
+    <div style={{ maxWidth: 520, margin: "0 auto", padding: "0 16px 40px" }}>
+
+      {/* HEADER */}
+      <div style={{ textAlign: "center", padding: "22px 0 6px" }}>
+        <div style={{ fontSize: 10.5, letterSpacing: 4, color: C.accent, textTransform: "uppercase", fontWeight: 600 }}>SårAssist</div>
+        <div style={{ fontSize: 23, fontWeight: 700, fontFamily: "'Source Serif 4', Georgia, serif", color: C.text, margin: "3px 0" }}>Sårdokumentasjon</div>
+        <div style={{ fontSize: 11.5, color: C.textMuted, fontStyle: "italic" }}>TIMES-rammeverk • AI-assistert klinisk verktøy</div>
+      </div>
+
+      {/* STEP BAR */}
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: "14px 0 18px" }}>
+        {STEPS.map((step, i) => (
+          <div key={step.id} style={{ display: "flex", alignItems: "center" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: i <= pageIndex ? "pointer" : "default", opacity: i <= pageIndex ? 1 : 0.3 }}
+              onClick={() => { if (i <= pageIndex) setPage(step.id); }}>
+              <div style={{ width: 9, height: 9, borderRadius: "50%", background: i === pageIndex ? C.accent : i < pageIndex ? C.accentDim : C.border, boxShadow: i === pageIndex ? `0 0 10px ${C.accentDim}` : "none", transition: "all 0.3s" }} />
+              <div style={{ fontSize: 9.5, letterSpacing: 0.5, color: i === pageIndex ? C.accent : i < pageIndex ? C.textSec : C.textMuted, transition: "color 0.3s" }}>{step.label}</div>
+            </div>
+            {i < STEPS.length - 1 && <div style={{ width: 28, height: 1, background: i < pageIndex ? C.accentDim : C.border, margin: "0 6px", marginBottom: 14 }} />}
+          </div>
+        ))}
+      </div>
+
+      {/* ERROR */}
+      {error && (
+        <div style={{ background: "rgba(199,91,91,0.08)", border: `1px solid ${C.error}`, borderRadius: 10, padding: "9px 14px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", animation: "wa-fadeIn 0.2s" }}>
+          <span style={{ fontSize: 12.5, color: C.error }}>{error}</span>
+          <span style={{ cursor: "pointer", color: C.error, fontWeight: 700, fontSize: 15 }} onClick={() => setError("")}>×</span>
+        </div>
+      )}
+
+      {/* ═══════ OPPSETT ═══════ */}
+      {page === "oppsett" && (<div style={{ animation: "wa-fadeIn 0.25s ease-out" }}>
+        {/* GDPR */}
+        <div style={{ ...cardStyle, borderColor: "rgba(91,164,181,0.15)", background: "rgba(91,164,181,0.03)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+            <div style={{ fontSize: 12, color: C.textSec, lineHeight: 1.45 }}>🔒 Bilder sendes direkte til valgt AI-leverandør. Ingen data lagres av dette verktøyet.</div>
+            <span style={{ cursor: "pointer", color: C.accent, fontSize: 11, whiteSpace: "nowrap", flexShrink: 0 }} onClick={() => setGdprExpanded(!gdprExpanded)}>{gdprExpanded ? "Skjul ▲" : "Les mer ▼"}</span>
+          </div>
+          {gdprExpanded && (
+            <div style={{ marginTop: 10, fontSize: 11.5, color: C.textMuted, lineHeight: 1.6, borderTop: `1px solid ${C.border}`, paddingTop: 10, animation: "wa-fadeIn 0.2s" }}>
+              <strong style={{ color: C.textSec }}>Personvern og GDPR:</strong> Sårbilder er helseopplysninger. Ved bruk sendes bilder til en ekstern AI-tjeneste (Anthropic/OpenAI/Google) for analyse. Bildene lagres ikke av dette verktøyet, men behandles midlertidig av AI-leverandøren iht. deres vilkår.<br/><br/>
+              <strong style={{ color: C.textSec }}>Ditt ansvar:</strong><br/>
+              • Aldri inkluder identifiserende informasjon i bildene (ansikt, navneskilt, romnummer)<br/>
+              • Avklar med leder/personvernombud om bruk er iht. kommunens retningslinjer<br/>
+              • API-nøkler lagres kun lokalt i din nettleser<br/>
+              • AI-rapporter er utkast — du kvalitetssikrer før journalføring
+            </div>
+          )}
+        </div>
+
+        {/* Provider */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>AI-leverandør</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {Object.entries(PROVIDERS).map(([key, prov]) => (
+              <GlassBtn key={key} onClick={() => handleProviderChange(key)}
+                style={{ padding: "7px 14px", fontSize: 12, background: settings.provider === key ? C.accent : "rgba(30,34,43,0.8)", color: settings.provider === key ? C.bg : C.textSec, borderColor: settings.provider === key ? C.accent : C.border }}>
+                {prov.label}
+              </GlassBtn>
+            ))}
+          </div>
+        </div>
+
+        {/* API Key */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>API-nøkkel</label>
+          <input type="password" style={inputStyle} placeholder={PROVIDERS[settings.provider].keyPlaceholder}
+            value={settings.apiKey} onChange={(e) => updateSetting("apiKey", e.target.value)} onFocus={focusInput} onBlur={blurInput} />
+          <div style={hintStyle}>
+            Hent nøkkel → <a href={PROVIDERS[settings.provider].keyUrl} target="_blank" rel="noopener" style={{ color: C.accent, textDecoration: "none" }}>{PROVIDERS[settings.provider].keyUrl.replace("https://","")}</a>
+          </div>
+        </div>
+
+        {/* Model */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>Modell</label>
+          <div style={{ position: "relative" }}>
+            <select style={{ ...inputStyle, cursor: "pointer", appearance: "none", WebkitAppearance: "none", paddingRight: 30 }} value={settings.model} onChange={(e) => updateSetting("model", e.target.value)}>
+              {PROVIDERS[settings.provider].models.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <div style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", color: C.textMuted, pointerEvents: "none", fontSize: 10 }}>▼</div>
+          </div>
+        </div>
+
+        {/* Email */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>Jobb-e-post</label>
+          <input type="email" style={inputStyle} placeholder="navn.etternavn@kommune.no"
+            value={settings.email} onChange={(e) => updateSetting("email", e.target.value)} onFocus={focusInput} onBlur={blurInput} />
+          <div style={hintStyle}>Rapporten åpnes i enhetens e-postklient (fungerer på alle telefoner).</div>
+        </div>
+
+        {/* System Prompt */}
+        <div style={cardStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Systemprompt</label>
+            <GlassBtn onClick={() => { setShowPrompt(!showPrompt); setEditingPrompt(false); }}
+              style={{ padding: "4px 12px", fontSize: 10.5, background: "transparent", color: C.accent, borderColor: C.accentDim }}>
+              {showPrompt ? "Skjul" : "Vis"}
+            </GlassBtn>
+          </div>
+          <div style={hintStyle}>Tilpasses automatisk etter rapporttype og kliniske observasjoner.</div>
+          {showPrompt && (
+            <div style={{ marginTop: 10, animation: "wa-fadeIn 0.2s" }}>
+              {editingPrompt ? (
+                <>
+                  <textarea style={{ ...inputStyle, minHeight: 180, resize: "vertical", lineHeight: 1.5, fontSize: 11, fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace" }}
+                    value={settings.customPrompt || ""} onChange={(e) => updateSetting("customPrompt", e.target.value)}
+                    placeholder="Lim inn din egen systemprompt her. Tom = innebygd prompt brukes." />
+                  <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                    <GlassBtn onClick={() => updateSetting("customPrompt", currentPrompt)}
+                      style={{ padding: "5px 12px", fontSize: 10.5, background: "transparent", color: C.accent, borderColor: C.accentDim }}>Kopier innebygd hit</GlassBtn>
+                    {settings.customPrompt && <GlassBtn onClick={() => updateSetting("customPrompt", "")}
+                      style={{ padding: "5px 12px", fontSize: 10.5, background: "transparent", color: C.error, borderColor: C.error }}>Tilbakestill</GlassBtn>}
+                    <GlassBtn onClick={() => setEditingPrompt(false)}
+                      style={{ padding: "5px 12px", fontSize: 10.5, background: "transparent", color: C.success, borderColor: C.success }}>Ferdig</GlassBtn>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <pre style={{ fontSize: 10.5, color: C.textMuted, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", background: C.surface, borderRadius: 8, padding: 12, border: `1px solid ${C.border}`, maxHeight: 200, overflowY: "auto" }}>{currentPrompt}</pre>
+                  <GlassBtn onClick={() => setEditingPrompt(true)}
+                    style={{ marginTop: 6, padding: "5px 12px", fontSize: 10.5, background: "transparent", color: C.warning, borderColor: C.warning }}>✏ Rediger</GlassBtn>
+                </>
+              )}
+              <div style={hintStyle}>Innebygd prompt dekker TIMES, kamerakalibrering, klinisk journalspråk. Endre kun om du vet hva du gjør.</div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 18 }}>
+          <GlassBtn onClick={() => setPage("forberedelse")} style={{ padding: "13px 44px", fontSize: 14.5, background: C.accent, color: C.bg }}>
+            Fortsett til forberedelse →
+          </GlassBtn>
+        </div>
+      </div>)}
+
+      {/* ═══════ FORBEREDELSE ═══════ */}
+      {page === "forberedelse" && (<div style={{ animation: "wa-fadeIn 0.25s ease-out" }}>
+        {/* Report type */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>Rapporttype</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {REPORT_TYPES.map((rt) => (
+              <div key={rt.id} onClick={() => setReportType(rt.id)}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", borderRadius: 10, cursor: "pointer", transition: "all 0.2s",
+                  background: reportType === rt.id ? "rgba(91,164,181,0.1)" : "transparent",
+                  border: `1px solid ${reportType === rt.id ? C.accent : C.border}` }}>
+                <span style={{ fontSize: 20 }}>{rt.icon}</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: reportType === rt.id ? C.accent : C.text }}>{rt.label}</div>
+                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 1 }}>{rt.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Photos */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>Bilder</label>
+          <div style={{ background: "rgba(91,181,119,0.05)", border: "1px solid rgba(91,181,119,0.12)", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+            <div style={{ fontSize: 11.5, color: C.textSec, lineHeight: 1.5 }}>
+              💡 Legg en <strong style={{ color: C.success }}>hvit kompress eller papir</strong> ved siden av såret for fargekalibrering.
+            </div>
+          </div>
+
+          {/* Flash */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: C.text, fontWeight: 600, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+              📸 Med blits <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 10, fontWeight: 600, background: "rgba(91,164,181,0.15)", color: C.accent }}>Påkrevd</span>
+            </div>
+            <input ref={flashRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleImg(e.target.files?.[0], "flash")} />
+            {imgFlashPrev ? (
+              <div style={{ position: "relative" }}>
+                <img src={imgFlashPrev} alt="" style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 8 }} />
+                <GlassBtn onClick={() => { setImgFlash(null); setImgFlashPrev(null); if(flashRef.current) flashRef.current.value=""; }}
+                  style={{ position: "absolute", top: 8, right: 8, padding: "3px 10px", fontSize: 11, background: "rgba(0,0,0,0.6)", color: "#fff", borderColor: "transparent" }}>✕</GlassBtn>
+              </div>
+            ) : (
+              <div onClick={() => flashRef.current?.click()}
+                style={{ border: `2px dashed ${C.border}`, borderRadius: 10, padding: "22px 14px", textAlign: "center", cursor: "pointer", transition: "border-color 0.2s" }}>
+                <div style={{ fontSize: 24, marginBottom: 4 }}>📸</div>
+                <div style={{ fontSize: 12, color: C.textSec }}>Trykk for å ta bilde eller last opp</div>
+                <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2 }}>Sørg for at BLITS er PÅ</div>
+              </div>
+            )}
+          </div>
+
+          {/* No flash */}
+          <div>
+            <div style={{ fontSize: 12, color: C.text, fontWeight: 600, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+              🔆 Uten blits <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 10, fontWeight: 600, background: "rgba(201,160,77,0.12)", color: C.warning }}>Anbefalt</span>
+            </div>
+            <input ref={noFlashRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleImg(e.target.files?.[0], "noFlash")} />
+            {imgNoFlashPrev ? (
+              <div style={{ position: "relative" }}>
+                <img src={imgNoFlashPrev} alt="" style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 8 }} />
+                <GlassBtn onClick={() => { setImgNoFlash(null); setImgNoFlashPrev(null); if(noFlashRef.current) noFlashRef.current.value=""; }}
+                  style={{ position: "absolute", top: 8, right: 8, padding: "3px 10px", fontSize: 11, background: "rgba(0,0,0,0.6)", color: "#fff", borderColor: "transparent" }}>✕</GlassBtn>
+              </div>
+            ) : (
+              <div onClick={() => noFlashRef.current?.click()}
+                style={{ border: `2px dashed ${C.border}`, borderRadius: 10, padding: "22px 14px", textAlign: "center", cursor: "pointer", transition: "border-color 0.2s" }}>
+                <div style={{ fontSize: 24, marginBottom: 4 }}>🔆</div>
+                <div style={{ fontSize: 12, color: C.textSec }}>Trykk for å ta bilde eller last opp</div>
+                <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2 }}>Kun omgivelseslys — ingen blits</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Clinical observations */}
+        <div style={cardStyle}>
+          <label style={labelStyle}>Kliniske observasjoner (det AI ikke ser)</label>
+          <div style={{ fontSize: 11.5, color: C.textMuted, marginBottom: 10, lineHeight: 1.4 }}>Fyll inn det du observerer ved sengen. Inkluderes i analysen.</div>
+          {CLINICAL_INPUTS.map((ci) => (
+            <div key={ci.id} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: C.textSec, marginBottom: 3, display: "flex", alignItems: "center", gap: 5 }}>
+                <span>{ci.icon}</span> {ci.label}
+              </div>
+              <input style={inputStyle} placeholder={ci.placeholder}
+                value={clinical[ci.id]} onChange={(e) => setClinical((p) => ({ ...p, [ci.id]: e.target.value }))}
+                onFocus={focusInput} onBlur={blurInput} />
+            </div>
+          ))}
+        </div>
+
+        {/* Advanced notes */}
+        <div style={cardStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setShowAdvNotes(!showAdvNotes)}>
+            <label style={{ ...labelStyle, marginBottom: 0, cursor: "pointer" }}>Tilleggsinformasjon (avansert)</label>
+            <span style={{ color: C.textMuted, fontSize: 11 }}>{showAdvNotes ? "▲" : "▼"}</span>
+          </div>
+          {showAdvNotes && (
+            <div style={{ marginTop: 8, animation: "wa-fadeIn 0.2s" }}>
+              <textarea style={{ ...inputStyle, minHeight: 80, resize: "vertical", lineHeight: 1.5 }}
+                placeholder="Relevant tilleggsinfo for AI-en: sykehistorie, tidligere behandling, allergi, diabetes, antikoagulantia, aktuell antibiotika, etc."
+                value={advancedNotes} onChange={(e) => setAdvancedNotes(e.target.value)} onFocus={focusInput} onBlur={blurInput} />
+              <div style={hintStyle}>Sendes til AI-en sammen med bildene og kliniske observasjoner.</div>
+            </div>
+          )}
+        </div>
+
+        {/* Buttons */}
+        <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "center", flexWrap: "wrap" }}>
+          <GlassBtn onClick={() => setPage("oppsett")} style={{ background: "transparent", color: C.textSec, borderColor: C.border }}>← Oppsett</GlassBtn>
+          <GlassBtn onClick={runAnalysis} disabled={analyzing || !canAnalyze}
+            style={{ padding: "13px 32px", background: C.accent, color: C.bg }}>
+            {analyzing ? (<span style={{ display: "flex", alignItems: "center", gap: 7 }}><span className="wa-spinner" />Analyserer…</span>) : "🔬 Analyser sår"}
+          </GlassBtn>
+        </div>
+      </div>)}
+
+      {/* ═══════ ANALYSE ═══════ */}
+      {page === "analyse" && (<div style={{ animation: "wa-fadeIn 0.25s ease-out" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <span style={{ padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: "rgba(91,181,119,0.12)", color: C.success }}>
+            ✓ {REPORT_TYPES.find((r) => r.id === reportType)?.label}
+          </span>
+          <span style={{ fontSize: 10.5, color: C.textMuted }}>{PROVIDERS[settings.provider].label}</span>
+        </div>
+
+        {/* Journal report */}
+        <div style={{ ...cardStyle, borderColor: "rgba(91,164,181,0.2)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <span style={{ ...labelStyle, marginBottom: 0, color: C.accent }}>Journalrapport</span>
+            <GlassBtn onClick={copyReport} style={{ padding: "4px 12px", fontSize: 10.5, background: "transparent", color: copied ? C.success : C.accent, borderColor: copied ? C.success : C.accentDim }}>
+              {copied ? "✓ Kopiert" : "📋 Kopier"}
+            </GlassBtn>
+          </div>
+          <MdRender text={report} />
+        </div>
+
+        {/* Merknader */}
+        {merknader && (
+          <div style={{ ...cardStyle, borderColor: "rgba(201,160,77,0.15)", background: "rgba(201,160,77,0.03)" }}>
+            <label style={{ ...labelStyle, color: C.warning, marginBottom: 8 }}>⚠ AI-merknader (ikke del av journal)</label>
+            <MdRender text={merknader} muted={true} />
+          </div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", marginTop: 14 }}>
+          <GlassBtn onClick={() => setPage("rediger")} style={{ background: C.accent, color: C.bg }}>✏ Rediger rapport</GlassBtn>
+          {settings.email && <GlassBtn onClick={emailReport} style={{ background: "transparent", color: C.success, borderColor: C.success }}>✉ Send epost</GlassBtn>}
+          <GlassBtn onClick={resetCapture} style={{ background: "transparent", color: C.warning, borderColor: C.warning }}>🔄 Nytt sår</GlassBtn>
+        </div>
+      </div>)}
+
+      {/* ═══════ REDIGER & SEND ═══════ */}
+      {page === "rediger" && (<div style={{ animation: "wa-fadeIn 0.25s ease-out" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <label style={{ ...labelStyle, marginBottom: 0 }}>Rediger rapport</label>
+          <GlassBtn onClick={() => setPage("analyse")} style={{ padding: "4px 12px", fontSize: 10.5, background: "transparent", color: C.textSec, borderColor: C.border }}>← Tilbake</GlassBtn>
+        </div>
+
+        {/* Current report */}
+        <div style={{ ...cardStyle, maxHeight: 260, overflowY: "auto", borderColor: "rgba(91,164,181,0.15)" }}>
+          <MdRender text={report} />
+          {merknader && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10.5, color: C.warning, fontWeight: 600, marginBottom: 4 }}>MERKNADER:</div>
+              <MdRender text={merknader} muted={true} />
+            </div>
+          )}
+        </div>
+
+        {/* Quick suggestions */}
+        <div style={{ ...cardStyle, background: "rgba(91,164,181,0.03)", borderColor: "rgba(91,164,181,0.12)" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: C.accent, marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>💬 Hurtigredigering</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {[
+              "Gjør rapporten kortere og mer presis",
+              "Mer slough enn beskrevet — øk prosentandel",
+              "Legg til underminering av sårkanter",
+              "Inkluder at det er tydelig lukt ved stell",
+              "Endre bandasjeanbefaling til Aquacel Ag+",
+              "Pasient bruker antikoagulantia — inkluder",
+              "Fjern anbefaling om lege — allerede vurdert",
+              "Skriv om til revurdering, ikke nytt sår",
+            ].map((sug) => (
+              <button key={sug} onClick={() => setRefineInput(sug)}
+                style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface, color: C.textSec, fontSize: 10.5, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s, transform 0.1s" }}
+                onMouseDown={(e) => { e.currentTarget.style.transform = "scale(0.96)"; e.currentTarget.style.boxShadow = "0 0 8px rgba(91,164,181,0.15)"; }}
+                onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "none"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "none"; }}>
+                {sug}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* History */}
+        {refineHistory.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            {refineHistory.map((msg, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start", marginBottom: 5 }}>
+                <div style={{ maxWidth: "80%", padding: "7px 11px", borderRadius: 9, fontSize: 12,
+                  background: msg.role === "user" ? C.accentDim : C.card, color: msg.role === "user" ? "#fff" : C.textSec,
+                  border: msg.role === "user" ? "none" : `1px solid ${C.border}` }}>
+                  {msg.text}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Input */}
+        <div style={{ display: "flex", gap: 7, alignItems: "flex-end" }}>
+          <textarea style={{ ...inputStyle, minHeight: 44, maxHeight: 110, resize: "vertical", flex: 1 }}
+            placeholder="Beskriv hva du vil endre i rapporten…"
+            value={refineInput} onChange={(e) => setRefineInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); runRefinement(); } }}
+            onFocus={focusInput} onBlur={blurInput} />
+          <GlassBtn onClick={runRefinement} disabled={!refineInput.trim() || refining}
+            style={{ padding: "10px 16px", background: C.accent, color: C.bg }}>
+            {refining ? <span className="wa-spinner" /> : "Send"}
+          </GlassBtn>
+        </div>
+
+        {/* Export */}
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 18, flexWrap: "wrap" }}>
+          <GlassBtn onClick={copyReport} style={{ background: "transparent", color: C.accent, borderColor: C.accentDim }}>{copied ? "✓ Kopiert" : "📋 Kopier rapport"}</GlassBtn>
+          {settings.email && <GlassBtn onClick={emailReport} style={{ background: "transparent", color: C.success, borderColor: C.success }}>✉ Send epost</GlassBtn>}
+          <GlassBtn onClick={resetCapture} style={{ background: "transparent", color: C.warning, borderColor: C.warning }}>🔄 Nytt sår</GlassBtn>
+        </div>
+      </div>)}
+
+      {/* FOOTER */}
+      <div style={{ textAlign: "center", marginTop: 28, paddingBottom: 14 }}>
+        <div style={{ fontSize: 9.5, color: C.textMuted, letterSpacing: 1 }}>SÅRASSIST v2.0 • Kun for autorisert helsepersonell</div>
+        <div style={{ fontSize: 9.5, color: C.textMuted, marginTop: 2 }}>AI-rapporter krever klinisk gjennomgang før journalføring</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
